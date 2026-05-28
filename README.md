@@ -9,23 +9,14 @@ how real fraud teams use rules and ML together — not as alternatives, but as l
 ## Project Structure
 
 ```
-fraud_detection_project/
+fraud-detection-system/
 ├── sql/
 │   ├── 01_exploratory_analysis.sql
-│   ├── 02_fraud_by_segment.sql
-│   ├── 03_velocity_detection.sql
-│   ├── 04_bin_attack_detection.sql
-│   ├── 05_geo_velocity_fraud.sql
-│   ├── 06_ato_detection.sql
-│   ├── 07_merchant_risk.sql
-│   ├── 08_aml_structuring.sql
-│   ├── 09_risk_scoring_engine.sql
-│   └── 10_decision_engine_hybrid.sql
+│   ├── 02_velocity_bin_geo.sql
+│   ├── 03_ato_merchant_structuring.sql
+│   └── 04_hybrid_decision_engine.sql
 ├── python/
-│   ├── 01_data_setup.py
-│   ├── 02_feature_engineering.py
-│   ├── 03_xgboost_model.py
-│   └── 04_threshold_analysis.py
+│   └── fraud_detection_xgboost.ipynb
 ├── data/
 │   └── fraud_db_setup.sql
 ├── docs/
@@ -61,27 +52,21 @@ Generated using `data/fraud_db_setup.sql` — fully reproducible in MySQL.
 
 ## Part 1 — SQL Rule Engine
 
-Ten detection modules built progressively, each targeting a specific fraud pattern.
+Four modules built progressively, each targeting specific fraud patterns.
 
 ### Modules
 
-| Module | Fraud Pattern | Key Technique |
+| File | Fraud Patterns Covered | Key SQL Techniques |
 |---|---|---|
-| 01 | Exploratory analysis | GROUP BY, conditional aggregation |
-| 02 | Fraud by segment | CASE WHEN, fraud rate % |
-| 03 | Daily velocity detection | GROUP BY + HAVING |
-| 04 | Rolling 1-hour velocity | Self JOIN, INTERVAL window |
-| 05 | BIN attack detection | CTE, decline rate analysis |
-| 06 | Geo-velocity fraud | LAG(), TIMESTAMPDIFF, impossible travel |
-| 07 | ATO detection | Multi-signal AND logic |
-| 08 | Merchant risk monitoring | JOIN, chargeback rate |
-| 09 | AML structuring | Near-threshold pattern detection |
-| 10 | Risk scoring + decision engine | Weighted CASE WHEN, hybrid architecture |
+| 01_exploratory_analysis | Baseline fraud rate by segment, KYC, account age | GROUP BY, conditional aggregation, CASE WHEN |
+| 02_velocity_bin_geo | Daily velocity, rolling 1-hour velocity, BIN attacks, geo-velocity | Self JOIN, INTERVAL window, CTE, LAG(), TIMESTAMPDIFF |
+| 03_ato_merchant_structuring | Account takeover, merchant chargeback risk, AML structuring | Multi-signal AND logic, JOIN, near-threshold detection |
+| 04_hybrid_decision_engine | Risk scoring engine + final decision engine | Weighted CASE WHEN, hard rules, 4-CTE chain |
 
 ### Risk Scoring Engine
 
 Each transaction receives a weighted risk score based on 10 fraud signals.  
-Weights were initially set by domain knowledge, then validated by XGBoost feature importance.
+Weights initially set by domain knowledge, then validated by XGBoost feature importance.
 
 | Signal | Weight | Basis |
 |---|---|---|
@@ -103,7 +88,8 @@ Soft scoring for combinations of weaker signals.
 
 ```
 Strong single signal  →  HARD BLOCK  (no score needed)
-Weak signals combined →  Score ≥ threshold → REVIEW or APPROVE
+Weak signals combined →  Score ≥ 25  →  REVIEW
+                         Score < 25  →  APPROVE
 ```
 
 **Hard block conditions:**
@@ -112,9 +98,13 @@ Weak signals combined →  Score ≥ threshold → REVIEW or APPROVE
 - failed_logins > 2 AND amount > $800
 - risk_segment = High AND kyc_verified = 0 AND merchant = Crypto/Gaming
 
+**Why failed_logins is excluded from soft score:**  
+It is already the trigger for 3 of 4 hard rules — including it in soft scoring  
+would double-count the signal. The two layers are kept cleanly separated.
+
 ### Decision Engine Results
 
-| Decision | Transactions | Fraud Count | Fraud Rate | False Positive Rate |
+| Decision | Transactions | Fraud Count | Fraud Rate | FP Rate |
 |---|---|---|---|---|
 | BLOCK | 285 | 112 | 39.3% | 60.7% |
 | REVIEW | 3,146 | 87 | 2.77% | 97.2% |
@@ -131,28 +121,23 @@ Weak signals combined →  Score ≥ threshold → REVIEW or APPROVE
 Rule engines catch known fraud patterns. ML catches unknown ones.  
 More importantly — ML tells you which signals actually matter vs which ones you assumed matter.
 
-### Feature Engineering
+### Notebook Structure
 
-11 features engineered from raw transaction data:
-
-```python
-# Behavioural features
-daily_velocity      # transactions per user per day
-amt_vs_avg_ratio    # amount relative to user's own average
-txn_hour            # hour of transaction
-
-# Risk flags
-is_foreign          # country != transaction location
-flag_cnp            # card not present
-flag_risky_merchant # Crypto or Gaming category
-flag_high_risk_seg  # high risk segment label
-
-# Identity signals
-amount              # raw transaction amount
-failed_logins       # raw failed login count
-account_age         # days since account creation
-kyc_verified        # KYC verification status
-```
+| Step | What it does |
+|---|---|
+| Step 1 | Load 50,000 transactions from MySQL |
+| Step 2 | Feature engineering v1 — binary flags baseline |
+| Step 3 | Train XGBoost model v1 |
+| Step 4 | Evaluate model v1 — reveals binary flags are too coarse |
+| Step 5 | Feature engineering v2 — raw continuous values |
+| Step 6 | Evaluate model v2 — dramatic improvement over v1 |
+| Step 7 | XGBoost feature importance analysis |
+| Step 8 | Map importance scores to SQL weights v1 |
+| Step 9 | Proportional ML-validated SQL weights v2 |
+| Step 10 | Threshold analysis — precision/recall trade-off |
+| Step 11 | Signal coverage analysis — why recall is capped |
+| Step 12 | Hybrid decision engine — hard rules + soft scoring |
+| Step 13 | Final 3-way comparison V1 vs V2 vs V3 |
 
 ### Model Performance
 
@@ -166,28 +151,21 @@ kyc_verified        # KYC verification status
 *Near-perfect scores reflect synthetic data leakage — fraud labels were generated  
 from the same features used in training. See limitations section.
 
-### XGBoost Feature Importance
+### XGBoost Feature Importance — SQL Weight Validation
 
-ML importance scores used to revalidate SQL rule weights:
-
-```
-failed_logins      60.5%  ← confirms highest SQL weight correct
-amount             11.3%  ← SQL weight reduced from 25 to 10
-kyc_verified        8.2%  ← SQL weight reduced from 20 to 9
-flag_high_risk_seg  7.8%  ← SQL weight increased from 10 to 9
-flag_risky_merchant 6.2%  ← SQL weight reduced from 15 to 8
-is_foreign          3.1%  ← SQL weight reduced from 20 to 6
-daily_velocity      0.0%  ← removed from scoring engine entirely
-```
-
-**Key finding:** `is_foreign` was overweighted at 20 points — it fires on 80% of  
-transactions making it a noisy signal. ML importance of 3.1% confirmed this.  
-`flag_high_risk_seg` was underweighted at 10 points — ML confirmed it should be  
-almost equal to `kyc_verified`.
+| Feature | ML Importance | Old SQL Weight | New SQL Weight | Change |
+|---|---|---|---|---|
+| failed_logins | 60.5% | 30 | 35 | ↑ Confirmed strongest |
+| amount | 11.3% | 25 | 10 | ↓ Was overweighted |
+| kyc_verified | 8.2% | 20 | 9 | ↓ Reduced |
+| flag_high_risk_seg | 7.8% | 10 | 9 | ↑ Was underweighted |
+| flag_risky_merchant | 6.2% | 15 | 8 | ↓ Reduced |
+| is_foreign | 3.1% | 20 | 6 | ↓ Significantly overweighted |
+| daily_velocity | 0.0% | 20 | 0 | ❌ Removed entirely |
 
 ### Threshold Analysis
 
-Systematic evaluation of every threshold from 35 to 97:
+Systematic evaluation showing no single threshold resolves the precision-recall trade-off:
 
 | Threshold | Precision | Recall | F1 | FP Rate |
 |---|---|---|---|---|
@@ -195,21 +173,21 @@ Systematic evaluation of every threshold from 35 to 97:
 | 50 | 25.9% | 8.7% | 0.130 | 74.1% |
 | 65 | 80.0% | 1.5% | 0.030 | 20.0% |
 
-**Best F1 at threshold 35** — but recall still only 20.6%.  
-This led to the hybrid architecture decision.
+Best F1 at threshold 35 — but recall still only 20.6%.  
+This directly motivated the hybrid architecture decision.
 
 ---
 
-## Evolution of the Decision Engine
+## Decision Engine Evolution
 
-| Version | Architecture | BLOCK Precision | BLOCK FP Rate | Recall |
-|---|---|---|---|---|
-| V1 | Domain weights, threshold 60 | 7.75% | 92.25% | 33.2% |
-| V2 | ML-validated weights, threshold 65 | 25.86% | 74.14% | 25.4% |
-| V3 | Hybrid hard rules + soft scoring | 39.30% | 60.70% | 25.4% |
+| Version | Architecture | BLOCK Precision | BLOCK FP Rate | BLOCK Count | Recall |
+|---|---|---|---|---|---|
+| V1 | Domain weights, threshold 60 | 7.75% | 92.25% | 3,344 | 33.2% |
+| V2 | ML-validated weights, threshold 65 | 25.86% | 74.14% | 263 | 25.4% |
+| V3 | Hybrid hard rules + soft scoring | 39.30% | 60.70% | 285 | 25.4% |
 
-V1 → V2: ML weights reduced BLOCK size by 92% while improving precision 3.3x.  
-V2 → V3: Hard rules pushed BLOCK precision to 39.3% — nearly 1 in 2 blocks is genuine fraud.
+**V1 → V2:** ML weights reduced BLOCK size by 92% (3,344 → 263) while improving precision 3.3x  
+**V2 → V3:** Hard rules pushed BLOCK precision to 39.3% — nearly 1 in 2 blocks is genuine fraud
 
 ---
 
@@ -217,20 +195,25 @@ V2 → V3: Hard rules pushed BLOCK precision to 39.3% — nearly 1 in 2 blocks i
 
 **1. Failed logins dominates all other signals**  
 At 60.5% XGBoost importance, failed_logins is 5x more predictive than the next feature.  
-A single failed_logins > 2 combined with any secondary signal justifies a hard block.
+Any transaction with failed_logins > 2 combined with one secondary signal justifies a hard block.
 
 **2. Foreign transaction signal was overweighted**  
-is_foreign fires on 80% of all transactions in this dataset — too broad to be a strong  
-discriminator. ML importance of 3.1% confirmed it should be a supporting signal only,  
-not a primary one. Reduced from 20 to 6 points in the scoring engine.
+is_foreign fires on 80% of all transactions — too broad to discriminate.  
+ML importance of 3.1% confirmed it should be a supporting signal only.  
+Reduced from 20 to 6 points in the scoring engine.
 
 **3. Hybrid architecture outperforms pure scoring**  
 Separating high-confidence single signals (hard rules) from weak signal combinations  
 (soft scoring) improved BLOCK precision from 25.86% to 39.30% without changing recall.
 
 **4. Rules and ML validate each other**  
-Domain expertise set initial weights. ML feature importance corrected three overweighted  
-signals and one underweighted signal. Neither approach alone would have found this.
+Domain expertise set initial weights. ML corrected three overweighted signals  
+and one underweighted signal. Neither approach alone would have found this.
+
+**5. REVIEW bucket should use step-up authentication in production**  
+97% false positive rate in REVIEW is unacceptable for human analyst review.  
+Solution: automated OTP or 3DS — customer self-clears in seconds,  
+ops team never sees it, false positive cost drops to near zero.
 
 ---
 
@@ -238,7 +221,7 @@ signals and one underweighted signal. Neither approach alone would have found th
 
 **Synthetic data ceiling — recall capped at 25%**
 
-582 fraud cases score low because they were labelled by single isolated signals  
+583 fraud cases score low because they were labelled by single isolated signals  
 in the data generator. The scoring engine requires multiple signals to fire together,  
 so single-signal fraud cases slip through at every threshold.
 
@@ -249,7 +232,7 @@ the constraint is the synthetic data, not the engine design.
 
 **Near-perfect ML metrics indicate data leakage**  
 Fraud labels were generated deterministically from the same features used in training.  
-XGBoost reverse-engineers the labelling rules rather than learning generalised patterns.  
+XGBoost reverse-engineers the labelling rules rather than learning generalised fraud patterns.  
 Real-world fraud models achieve 0.75–0.90 AUC-ROC on production data.
 
 ---
@@ -259,7 +242,7 @@ Real-world fraud models achieve 0.75–0.90 AUC-ROC on production data.
 **Prerequisites:**
 - MySQL 8.0+
 - Python 3.9+
-- MySQL Workbench (optional)
+- Jupyter Notebook
 
 **Step 1 — Set up the database:**
 ```sql
@@ -267,18 +250,22 @@ Real-world fraud models achieve 0.75–0.90 AUC-ROC on production data.
 source data/fraud_db_setup.sql
 ```
 
-**Step 2 — Run SQL modules:**
+**Step 2 — Run SQL modules in order:**
 ```sql
 USE fraud_db;
 source sql/01_exploratory_analysis.sql
--- run each module in order
+source sql/02_velocity_bin_geo.sql
+source sql/03_ato_merchant_structuring.sql
+source sql/04_hybrid_decision_engine.sql
 ```
 
-**Step 3 — Run Python model:**
+**Step 3 — Run the notebook:**
 ```bash
 pip install pandas numpy scikit-learn xgboost==2.1.1 mysql-connector-python matplotlib
-jupyter notebook python/03_xgboost_model.py
+jupyter notebook
 ```
+Open `python/fraud_detection_xgboost.ipynb` and run all cells.  
+Update MySQL password in connection cells before running.
 
 ---
 
@@ -287,13 +274,15 @@ jupyter notebook python/03_xgboost_model.py
 | Skill | Where |
 |---|---|
 | Advanced SQL — CTEs, window functions, self joins | All SQL modules |
-| Fraud domain knowledge — ATO, BIN attack, geo-velocity, structuring | Modules 04–09 |
-| Feature engineering | python/02_feature_engineering.py |
-| Class imbalance handling | scale_pos_weight in XGBoost |
-| Threshold optimisation | python/04_threshold_analysis.py |
-| ML-rule integration | Feature importance → SQL weight update |
-| Production thinking | Hybrid architecture, approval rate tracking |
-| Honest evaluation | Limitations section — synthetic data ceiling |
+| Fraud domain knowledge — ATO, BIN attack, geo-velocity, structuring | sql/02, sql/03 |
+| Feature engineering — raw values vs binary flags comparison | Notebook Steps 2 and 5 |
+| Class imbalance handling — scale_pos_weight in XGBoost | Notebook Step 3 |
+| Threshold optimisation — precision/recall trade-off | Notebook Step 10 |
+| Signal coverage analysis — why recall is capped | Notebook Step 11 |
+| ML-rule integration — feature importance → SQL weight update | Notebook Steps 7–9 |
+| Hybrid architecture — hard rules + soft scoring | sql/04, Notebook Step 12 |
+| Production thinking — approval rate, step-up auth recommendation | Notebook Step 12 |
+| Honest evaluation — synthetic data limitations acknowledged | Limitations section |
 
 ---
 
