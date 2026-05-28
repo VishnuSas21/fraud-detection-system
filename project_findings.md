@@ -19,12 +19,6 @@ Any transaction with `failed_logins > 2` combined with one secondary signal
 (high amount, no KYC, or high-risk merchant) justifies a hard block without
 needing a composite score. This became the foundation of the hybrid architecture.
 
-**Interview talking point:**
-"Failed logins is the strongest single ATO predictor in our dataset — 60.5%
-XGBoost importance. This validates our decision to use it as the primary hard
-rule trigger rather than one of many equal-weight scoring signals."
-
----
 
 ## Finding 2 — Foreign Transaction Signal Was Overweighted
 
@@ -134,3 +128,30 @@ or two signals independently — an unrealistic simplification.
 5. **Separate models per fraud type** — ATO model, BIN attack model, structuring
    model each trained on their own signal sets. Ensemble their outputs rather than
    using one model for all fraud types
+
+
+## Finding 6 — REVIEW Bucket Requires Step-Up Authentication Not Analyst Review
+
+REVIEW bucket false positive rate: 97.23% across 3,146 transactions.
+Sending every REVIEW case to a human analyst is operationally unviable.
+
+**Root cause:**
+Soft scoring captures borderline transactions — by definition these are mostly
+legitimate transactions with 2-3 weak signals. High false positives in REVIEW
+are expected, not a system failure.
+
+**Production solution:**
+Replace analyst review with automated step-up authentication:
+- Customer receives OTP or 3DS challenge
+- Legitimate customers self-clear in seconds
+- Ops team never sees the transaction
+- False positive cost drops to near zero
+- Only BLOCK bucket requires human analyst investigation
+
+**Key distinction:**
+BLOCK = high confidence fraud → analyst investigates
+REVIEW = uncertain → customer proves legitimacy themselves
+APPROVE = low risk → no friction
+
+This architecture reduces analyst workload by 94% compared to
+reviewing all flagged transactions manually.
