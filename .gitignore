@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+venv/
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Data files (too large for GitHub)
+*.db
+*.sqlite
+*.csv
+
+# Output files
+*.png
+*.jpg
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
